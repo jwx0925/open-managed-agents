@@ -193,7 +193,7 @@ export class OpenSandbox implements SandboxPort, SandboxRuntimePort, SandboxDupl
     const target = normalise(path);
     await this.execd("/directories", json({ [target.slice(0, target.lastIndexOf("/")) || "/"]: { mode: 755 } }));
     const form = new FormData();
-    form.append("metadata", JSON.stringify({ path: target, mode: 644 }));
+    form.append("metadata", new Blob([JSON.stringify({ path: target, mode: 644 })], { type: "application/json" }), "metadata.json");
     form.append("file", new Blob([new Uint8Array(bytes)]), "file");
     await this.execd("/files/upload", { method: "POST", body: form });
     return target;
@@ -214,7 +214,7 @@ export class OpenSandbox implements SandboxPort, SandboxRuntimePort, SandboxDupl
 function normalise(path: string): string { return path.startsWith("/") ? path : `/workspace/${path}`; }
 function json(body: unknown): RequestInit { return { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }; }
 
-/** Parse incrementally: SSE records may cross network chunks or contain multiple data lines. */
+/** Parse incrementally: servers emit SSE data fields or blank-line-delimited JSON. */
 async function readEvents(response: Response): Promise<StreamEvent[]> {
   if (!response.body) throw new Error("OpenSandbox returned an empty command stream");
   const events: StreamEvent[] = [];
@@ -222,7 +222,8 @@ async function readEvents(response: Response): Promise<StreamEvent[]> {
   let pending = "";
   const record = (value: string) => {
     const data = value.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
-    if (data) events.push(JSON.parse(data) as StreamEvent);
+    const payload = data || (value.trimStart().startsWith("{") ? value.trim() : "");
+    if (payload) events.push(JSON.parse(payload) as StreamEvent);
   };
   try {
     while (true) {

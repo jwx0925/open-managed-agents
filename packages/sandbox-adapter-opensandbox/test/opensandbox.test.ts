@@ -58,7 +58,11 @@ describe("OpenSandbox native HTTP adapter", () => {
       expect(String(init!.body)).not.toContain("provider-secret");
     }
     const upload = calls.filter(([url]) => String(url).endsWith("/files/upload")).at(-1)![1]!.body as FormData;
-    expect(JSON.parse(upload.get("metadata") as string)).toEqual({ path: "/workspace/raw.bin", mode: 644 });
+    const metadata = upload.get("metadata") as File;
+    expect(metadata).toBeInstanceOf(Blob);
+    expect(metadata.name).toBe("metadata.json");
+    expect(metadata.type).toBe("application/json");
+    expect(JSON.parse(await metadata.text())).toEqual({ path: "/workspace/raw.bin", mode: 644 });
     expect(new Uint8Array(await (upload.get("file") as Blob).arrayBuffer())).toEqual(Uint8Array.of(0, 255, 1));
     expect(calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(1);
   });
@@ -89,6 +93,29 @@ describe("OpenSandbox native HTTP adapter", () => {
     await expect(sandbox.exec("missing")).rejects.toThrow("failed to execute");
     mockServer([{ type: "stdout", text: "partial" }]);
     await expect(sandbox.exec("true")).rejects.toThrow("before execution_complete");
+  });
+
+  it("accepts fragmented JSON command records and still rejects truncated execution", async () => {
+    mockServer();
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    let complete = true;
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (!String(url).endsWith("/command")) return original(url, init);
+      const events = [
+        { type: "init", text: "execution-id" },
+        { type: "ping", text: "pong" },
+        { type: "stdout", text: "héllo\n" },
+        ...(complete ? [done] : []),
+      ];
+      const bytes = new TextEncoder().encode(events.map((event) => JSON.stringify(event)).join("\n\n") + "\n\n");
+      return new Response(new ReadableStream({
+        start(controller) { for (const byte of bytes) controller.enqueue(Uint8Array.of(byte)); controller.close(); },
+      }), { headers: { "Content-Type": "text/event-stream" } });
+    });
+    const sandbox = await sandboxProvider.create(ctx, env);
+    expect(await sandbox.exec("printf hello")).toBe("héllo");
+    complete = false;
+    await expect(sandbox.exec("printf partial")).rejects.toThrow("before execution_complete");
   });
 
   it("cleans up an allocation whose provisioning fails", async () => {
