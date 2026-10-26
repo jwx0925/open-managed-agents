@@ -392,6 +392,7 @@ export async function createManagedNodeRuntime(
   await workspaceCheckpoints?.ensureSchema();
 
   const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
+    backgroundPiSandbox: true,
     ...(workspaceCheckpoints === undefined ? {} : { workspaceCheckpoints }),
     ...(config.workspace.sandboxLeaseTtlMs === undefined
       ? {}
