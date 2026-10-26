@@ -39,7 +39,7 @@ it.skipIf(process.env.OMA_OPENSANDBOX_CERTIFICATION !== "1")("runs the SDK-backe
     await original.destroy();
     expect(await original.status()).toBe("stopped");
     const manager = SandboxManager.create({ connectionConfig: {
-      domain: process.env.OPENSANDBOX_BASE_URL ?? process.env.OPENSANDBOX_DOMAIN,
+      domain: process.env.OPENSANDBOX_DOMAIN,
       protocol: process.env.OPENSANDBOX_PROTOCOL === "https" ? "https" : "http",
       apiKey: process.env.OPENSANDBOX_API_KEY ?? process.env.OPEN_SANDBOX_API_KEY,
       disableMetrics: true,

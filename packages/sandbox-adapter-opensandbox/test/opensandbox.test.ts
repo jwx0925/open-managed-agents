@@ -97,10 +97,10 @@ describe("OpenSandbox official SDK adapter", () => {
     await expect(sandboxProvider.restore({ provider: "opensandbox", checkpointId: "x", sourceRuntimeId: "x", scope: "portable", kind: "filesystem" }, ctx, env)).rejects.toThrow("not supported");
   });
 
-  it("keeps full API base URL prefixes when configuring the SDK", async () => {
+  it("configures the SDK lifecycle API using only domain and protocol", async () => {
     const server = mockSdkServer();
-    await create({ OPENSANDBOX_BASE_URL: "https://control.test/prefix/v1/" });
-    expect(server.calls[0]!.url.href).toBe("https://control.test/prefix/v1/sandboxes");
+    await create({ OPENSANDBOX_DOMAIN: "control.test:8443", OPENSANDBOX_PROTOCOL: "https" });
+    expect(server.calls[0]!.url.href).toBe("https://control.test:8443/v1/sandboxes");
   });
 
   it("closes the SDK transport on idempotent destruction and leaves failed deletion retryable", async () => {
@@ -170,11 +170,13 @@ describe("OpenSandbox official SDK adapter", () => {
   });
 
   it("uses existing connection variables and validates configured time units", () => {
-    expect(optionsFromEnvironment({})).toMatchObject({ baseUrl: "http://localhost:8080/v1", timeoutSeconds: 1800 });
-    expect(optionsFromEnvironment({ OPENSANDBOX_BASE_URL: "https://api.test/prefix/v1/", OPEN_SANDBOX_API_KEY: "sdk-alias", SANDBOX_IMAGE: "custom", OPENSANDBOX_TIMEOUT_SECONDS: "60" })).toMatchObject({ baseUrl: "https://api.test/prefix/v1", apiKey: "sdk-alias", image: "custom", timeoutSeconds: 60 });
-    expect(optionsFromEnvironment({ OPENSANDBOX_PROTOCOL: "https", OPENSANDBOX_DOMAIN: "host" }).baseUrl).toBe("https://host/v1");
+    expect(optionsFromEnvironment({})).toMatchObject({ domain: "localhost:8080", protocol: "http", timeoutSeconds: 1800 });
+    expect(optionsFromEnvironment({ OPENSANDBOX_DOMAIN: "api.test:8443", OPEN_SANDBOX_API_KEY: "sdk-alias", SANDBOX_IMAGE: "custom", OPENSANDBOX_TIMEOUT_SECONDS: "60" })).toMatchObject({ domain: "api.test:8443", apiKey: "sdk-alias", image: "custom", timeoutSeconds: 60 });
+    expect(optionsFromEnvironment({ OPENSANDBOX_PROTOCOL: "https", OPENSANDBOX_DOMAIN: "host" })).toMatchObject({ domain: "host", protocol: "https" });
     for (const value of ["-1", "0", "59", "1.5", "bad"]) expect(() => optionsFromEnvironment({ OPENSANDBOX_TIMEOUT_SECONDS: value })).toThrow("OPENSANDBOX_TIMEOUT_SECONDS");
-    expect(() => optionsFromEnvironment({ OPENSANDBOX_BASE_URL: "file:///tmp/key" })).toThrow("HTTP(S)");
-    expect(() => optionsFromEnvironment({ OPENSANDBOX_BASE_URL: "http://user:pass@host/v1" })).toThrow("credentials");
+    expect(() => optionsFromEnvironment({ OPENSANDBOX_PROTOCOL: "file" })).toThrow("OPENSANDBOX_PROTOCOL");
+    for (const domain of ["", "https://host/v1", "user:pass@host", "host/v1", "host?key=value", "host#fragment"]) {
+      expect(() => optionsFromEnvironment({ OPENSANDBOX_DOMAIN: domain })).toThrow("OPENSANDBOX_DOMAIN");
+    }
   });
 });

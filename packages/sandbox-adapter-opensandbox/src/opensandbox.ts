@@ -11,7 +11,8 @@ import type {
 import { spawnBridge } from "./stdio-bridge";
 
 export interface OpenSandboxOptions {
-  baseUrl: string;
+  domain: string;
+  protocol: "http" | "https";
   apiKey?: string;
   image: string;
   timeoutSeconds: number;
@@ -28,14 +29,17 @@ function positive(value: string | undefined, fallback: number, name: string, min
 }
 
 export function optionsFromEnvironment(env: SandboxFactoryEnv): OpenSandboxOptions {
-  const baseUrl = env.OPENSANDBOX_BASE_URL
-    ?? `${env.OPENSANDBOX_PROTOCOL ?? "http"}://${env.OPENSANDBOX_DOMAIN ?? "localhost:8080"}/v1`;
-  const url = new URL(baseUrl);
-  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
-    throw new Error("OPENSANDBOX_BASE_URL must be an HTTP(S) API base URL without credentials, query or fragment");
+  const domain = env.OPENSANDBOX_DOMAIN ?? "localhost:8080";
+  const protocol = env.OPENSANDBOX_PROTOCOL ?? "http";
+  if (protocol !== "http" && protocol !== "https") throw new Error("OPENSANDBOX_PROTOCOL must be http or https");
+  let url: URL;
+  try { url = new URL(`${protocol}://${domain}`); }
+  catch { throw new Error("OPENSANDBOX_DOMAIN must be a server host[:port]"); }
+  if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+    throw new Error("OPENSANDBOX_DOMAIN must be a server host[:port] without credentials, path, query or fragment");
   }
   return {
-    baseUrl: baseUrl.replace(/\/+$/, ""),
+    domain, protocol,
     apiKey: env.OPENSANDBOX_API_KEY ?? env.OPEN_SANDBOX_API_KEY,
     image: env.SANDBOX_IMAGE ?? "node:22-slim",
     timeoutSeconds: positive(env.OPENSANDBOX_TIMEOUT_SECONDS, 1800, "OPENSANDBOX_TIMEOUT_SECONDS", 60),
@@ -64,8 +68,8 @@ function providerError(operation: string, error: unknown): Error {
 
 function configuration(sdk: Awaited<ReturnType<typeof loadSdk>>, options: OpenSandboxOptions) {
   return new sdk.ConnectionConfig({
-    domain: options.baseUrl,
-    protocol: new URL(options.baseUrl).protocol === "https:" ? "https" : "http",
+    domain: options.domain,
+    protocol: options.protocol,
     apiKey: options.apiKey,
     requestTimeoutSeconds: 60,
     disableMetrics: true,
@@ -91,7 +95,7 @@ export class OpenSandbox implements SandboxPort, SandboxRuntimePort, SandboxDupl
   async serviceEndpoint(port: number) {
     const endpoint = await this.call(() => this.client.getEndpoint(port));
     const url = new URL(endpoint.endpoint.includes("://")
-      ? endpoint.endpoint : `${new URL(this.options.baseUrl).protocol}//${endpoint.endpoint}`);
+      ? endpoint.endpoint : `${this.options.protocol}://${endpoint.endpoint}`);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
       throw new Error("OpenSandbox returned an invalid service endpoint");
     }
