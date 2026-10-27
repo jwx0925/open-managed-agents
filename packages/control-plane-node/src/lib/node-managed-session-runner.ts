@@ -255,7 +255,7 @@ export class DefaultNodeManagedSessionRunner
     if (this.canOverlapSandboxStartup(input)) {
       // Keep provisioning after a text-only turn finishes. A later sandbox
       // operation awaits startup (or retries it), while text can stream now.
-      void startup.catch((error: unknown) => {
+      void startup.catch((error) => {
         console.warn(`[managed-runner] session ${input.sessionId}: background sandbox startup failed:`, error);
       });
       return;
@@ -606,7 +606,7 @@ export class DefaultNodeManagedSessionRunner
       if (abortController.signal.aborted) throw abortedError(abortController.signal);
       sandboxReady = true;
       beginHeartbeat();
-    }).catch((error: unknown) => {
+    }).catch((error) => {
       acquisition = undefined;
       throw error;
     });
