@@ -1353,6 +1353,9 @@ importers:
       '@larksuiteoapi/node-sdk':
         specifier: ^1.73.0
         version: 1.73.0
+      '@open-managed-agents/acp-runtime':
+        specifier: workspace:*
+        version: link:../acp-runtime
       '@open-managed-agents/agent':
         specifier: workspace:*
         version: link:../../apps/agent
@@ -2190,6 +2193,9 @@ importers:
       '@open-managed-agents/event-log':
         specifier: workspace:*
         version: link:../event-log
+      '@open-managed-agents/inference-proxy':
+        specifier: workspace:*
+        version: link:../inference-proxy
       '@open-managed-agents/integrations-core':
         specifier: workspace:*
         version: link:../integrations-core

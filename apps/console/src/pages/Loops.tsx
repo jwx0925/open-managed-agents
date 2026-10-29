@@ -536,6 +536,24 @@ function LoopForm(props: {
     }
   }
 
+  // A scheduled Loop can also be run by hand, e.g. to check it after setup.
+  const scheduled = fields.some(([key]) => key === "schedule");
+  const [started, setStarted] = useState(false);
+  async function runNow() {
+    if (!loop) return;
+    setBusy(true);
+    setProblems([]);
+    setStarted(false);
+    try {
+      await matter(`${loopPath(loop.id)}/run`, { method: "POST" });
+      setStarted(true);
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function remove() {
     if (!loop || !window.confirm(m.loops.confirmDelete)) return;
     setBusy(true);
@@ -706,6 +724,11 @@ function LoopForm(props: {
           </ul>
         </div>
       )}
+      {started && (
+        <div role="status" className="rounded-md border border-success/30 bg-success-subtle px-3 py-2 text-sm text-success">
+          {m.runStarted}
+        </div>
+      )}
 
       <div className="console-settings-actions">
         <Button onClick={() => void save()} disabled={busy}>
@@ -716,7 +739,17 @@ function LoopForm(props: {
         </Button>
         {loop && (
           <>
-            <Button variant="outline" className="ml-auto" onClick={() => void setEnabled(!loop.enabled)} disabled={busy}>
+            {scheduled && loop.enabled && (
+              <Button variant="outline" className="ml-auto" onClick={() => void runNow()} disabled={busy}>
+                {m.runNow}
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              className={scheduled && loop.enabled ? undefined : "ml-auto"}
+              onClick={() => void setEnabled(!loop.enabled)}
+              disabled={busy}
+            >
               {loop.enabled ? m.disable : m.enable}
             </Button>
             <Button variant="ghost" className="hover:text-danger" onClick={() => void remove()} disabled={busy}>
@@ -748,6 +781,24 @@ export function issueText(m: Messages["matter"], issue: MatterIssue): string | u
       : "";
   const text = fill(template, { ...params, field, expected, options });
   return params.item === undefined ? text : text + fill(m.issues.item, { item: params.item });
+}
+
+/** Repository URLs, one per line. The text is kept as typed (blank lines
+ * included) so a new line can be started; the value drops blank lines. */
+function RepositoriesField(props: { id: string; value: string[]; onChange: (value: string[]) => void }) {
+  const [text, setText] = useState(() => props.value.join("\n"));
+  return (
+    <Textarea
+      id={props.id}
+      rows={3}
+      placeholder="https://gitlab.example.com/group/project.git"
+      value={text}
+      onChange={(e) => {
+        setText(e.target.value);
+        props.onChange(e.target.value.split("\n").map((line) => line.trim()).filter(Boolean));
+      }}
+    />
+  );
 }
 
 /** One template option, rendered from its JSON Schema. */
@@ -785,7 +836,9 @@ function ConfigField(props: {
         {label}
         {props.required && <span className="text-danger"> *</span>}
       </Label>
-      {field["x-oma-widget"] === "bond-resources" ? (
+      {field["x-oma-widget"] === "repositories" ? (
+        <RepositoriesField id={id} value={Array.isArray(value) ? (value as string[]) : []} onChange={onChange} />
+      ) : field["x-oma-widget"] === "bond-resources" ? (
         <ResourcesField bond={props.bond} value={Array.isArray(value) ? (value as string[]) : []} onChange={onChange} />
       ) : field.enum ? (
         <Select value={String(value ?? "")} onValueChange={onChange}>

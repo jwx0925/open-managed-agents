@@ -14,6 +14,7 @@
  */
 
 import { MissingReferenceError } from "./issues.js";
+import { findRepositoryBond, RepositoryBondError } from "./repository-credential.js";
 import { makeConnectorAgentDriver } from "@openma/matter/agent";
 import type { WorkIntegration } from "@openma/matter/integration";
 import { createOpenMatter } from "@openma/matter/runtime";
@@ -81,8 +82,15 @@ export interface MatterHost {
   /** Give an Agent the Matter MCP server before a connection uses it.
    * Throws when this service cannot act in the tenant. */
   prepareAgent(tenantId: string, agentId: string): Promise<void>;
-  /** Throws a "not found" error unless the session's environment and vaults exist. */
+  /** Throws a "not found" error unless the session's environment and vaults
+   * exist and one GitLab Bond of the tenant serves each repository. */
   checkSession(tenantId: string, session: LoopSession): Promise<void>;
+  /**
+   * Runs a scheduled Loop now, as if its time had come: starts the connection
+   * on this replica if needed and puts one tick in its shared inbox. Resolves
+   * with the tick's time; throws when the Loop is not scheduled or not running.
+   */
+  runNow(kind: string, key: string, loopId: string): Promise<string>;
   /** Keys of the connections currently running. */
   running(): readonly string[];
   /** Whether this replica runs `key`, and its last error. */
@@ -99,12 +107,27 @@ const errorMessage = (error: unknown): string =>
     : String(error);
 
 const hasSession = (session: LoopSession): boolean =>
-  session.environmentId !== undefined || session.vaultIds.length > 0;
+  session.environmentId !== undefined || session.vaultIds.length > 0 || session.repositories.length > 0;
 
 const sessionMetadata = (session: LoopSession) => ({
   ...(session.environmentId === undefined ? {} : { environmentId: session.environmentId }),
   vaultIds: [...session.vaultIds],
+  ...(session.repositories.length === 0 ? {} : { repositories: [...session.repositories] }),
 });
+
+/** The driver key suffix of a Loop's session settings. Repositories join it
+ * only when set, so Loops saved before them keep their Sessions. */
+const sessionDigest = (session: LoopSession): string =>
+  createHash("sha256")
+    .update(
+      JSON.stringify([
+        session.environmentId ?? null,
+        [...session.vaultIds].sort(),
+        ...(session.repositories.length === 0 ? [] : [[...session.repositories].sort()]),
+      ]),
+    )
+    .digest("hex")
+    .slice(0, 12);
 
 /**
  * One Agent driver per Agent and session settings. A Loop without session
@@ -125,11 +148,7 @@ export const loopDrivers = (
     if (typeof agentId !== "string" || agentId === "") return { ...record, config };
     let key = agentId;
     if (hasSession(session)) {
-      const digest = createHash("sha256")
-        .update(JSON.stringify([session.environmentId ?? null, [...session.vaultIds].sort()]))
-        .digest("hex")
-        .slice(0, 12);
-      key = `${agentId}#${digest}`;
+      key = `${agentId}#${sessionDigest(session)}`;
     }
     if (!drivers.has(key)) drivers.set(key, { agentId, session });
     return { ...record, config: { ...config, agentId: key } };
@@ -191,6 +210,8 @@ interface Running {
   readonly kind: string;
   readonly revision: string;
   readonly stop: () => Promise<void>;
+  /** Runs a scheduled Loop of the connection now (see `runNow`). */
+  readonly fire?: (loopId: string) => Promise<string>;
 }
 
 export const createMatterHost = (options: MatterHostOptions): MatterHost => {
@@ -295,19 +316,17 @@ export const createMatterHost = (options: MatterHostOptions): MatterHost => {
       ),
     });
     wiring.install(application, loops);
+    const scheduleSource =
+      schedules.length === 0
+        ? undefined
+        : makeScheduleSource({
+            schedules,
+            authority: key,
+            ...(options.scheduleTimers === undefined ? {} : { timers: options.scheduleTimers }),
+            onError: (error) => report(error, key),
+          });
     const runtime = makeLocalLongConnectionRuntime({
-      source:
-        schedules.length === 0
-          ? wiring.source
-          : combineSources(
-              wiring.source,
-              makeScheduleSource({
-                schedules,
-                authority: key,
-                ...(options.scheduleTimers === undefined ? {} : { timers: options.scheduleTimers }),
-                onError: (error) => report(error, key),
-              }),
-            ),
+      source: scheduleSource === undefined ? wiring.source : combineSources(wiring.source, scheduleSource),
       application,
       inbox,
       connectionLabel: connection.label,
@@ -326,6 +345,7 @@ export const createMatterHost = (options: MatterHostOptions): MatterHost => {
     running.set(key, {
       kind: adapter.kind,
       revision: connection.revision,
+      ...(scheduleSource === undefined ? {} : { fire: scheduleSource.fire }),
       stop: async () => {
         await runtime.stop();
         await Effect.runPromise(Effect.either(inbox.close));
@@ -398,6 +418,17 @@ export const createMatterHost = (options: MatterHostOptions): MatterHost => {
         }
         return running.has(key);
       }),
+    runNow: async (kind, key, loopId) => {
+      const adapter = adapterOf(kind);
+      await serial(async () => {
+        const connection = await adapter.get(key);
+        if (connection === undefined) throw new Error("The Loop's Bond is gone");
+        if (running.get(key)?.revision !== connection.revision) await startConnection(adapter, connection);
+      });
+      const fire = running.get(key)?.fire;
+      if (fire === undefined) throw new Error("The Loop is not running; enable it and check its Bond");
+      return fire(loopId);
+    },
     prepareAgent: async (tenantId, agentId) => {
       const client = options.clientFor(tenantId);
       if (client === null) throw new Error(`No OpenMA access for tenant ${tenantId}`);
@@ -418,6 +449,16 @@ export const createMatterHost = (options: MatterHostOptions): MatterHost => {
       for (const vaultId of session.vaultIds) {
         const vault = await client.getVault(vaultId);
         if (vault === null || vault.archived_at) throw new MissingReferenceError("vaultIds", "Vault", vaultId);
+      }
+      for (const url of session.repositories) {
+        try {
+          await findRepositoryBond(options.db, tenantId, url);
+        } catch (error) {
+          if (error instanceof RepositoryBondError) {
+            throw new MissingReferenceError("repositories", "GitLab Bond for repository", url);
+          }
+          throw error;
+        }
       }
     },
     running: () => [...running.keys()],

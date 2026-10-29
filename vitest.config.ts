@@ -65,7 +65,6 @@ const cfWorkerOptions = {
   miniflare: {
     bindings: {
       API_KEY: "test-key",
-      ANTHROPIC_API_KEY: "sk-ant-test-key",
       DREAM_CURATOR_MODE: "dedup",
       BETTER_AUTH_SECRET: "test-auth-secret-for-vitest",
       // Required by buildServices for at-rest encryption of credentials.auth
@@ -333,6 +332,7 @@ export default defineConfig({
       { find: "@open-managed-agents/linear", replacement: "./packages/linear/src/index.ts" },
       { find: "@open-managed-agents/github", replacement: "./packages/github/src/index.ts" },
       { find: "@open-managed-agents/schema", replacement: "./packages/schema/src/index.ts" },
+      { find: "@open-managed-agents/http-routes/proxy", replacement: "./packages/http-routes/src/proxy/index.ts" },
       { find: "@open-managed-agents/http-routes", replacement: "./packages/http-routes/src/index.ts" },
       { find: "@open-managed-agents/integrations-core", replacement: "./packages/integrations-core/src/index.ts" },
       { find: "@open-managed-agents/integrations-adapters-cf", replacement: "./packages/integrations-adapters-cf/src/index.ts" },
@@ -441,6 +441,8 @@ export default defineConfig({
       "scripts/release-check.history.test.mjs",
       "scripts/setup-cf.test.mjs",
       "scripts/setup-fly.test.mjs",
+      // Self-host bootstrap script; node:test, run by test:self-host.
+      "scripts/bootstrap-model-card.test.mjs",
       // Credential certification orchestrates real Node child processes and
       // is run explicitly by test:certification:runner.
       "scripts/live-certification.test.mjs",
@@ -496,6 +498,8 @@ export default defineConfig({
       "packages/sandbox-adapter-e2b/**",
       "packages/sandbox-adapter-opensandbox/**",
       "packages/sandbox-adapter-litebox/**",
+      // Real Node fetch (undici) behaviour of the shared proxy hop.
+      "packages/http-routes/test/node/**",
       "packages/harness-supervisor/**",
       "packages/harness-runtime-acp/**",
       "packages/runtime-resource-fence-sql/**",

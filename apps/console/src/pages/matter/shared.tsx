@@ -3,7 +3,10 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Field } from "../../components/Field";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 import { FeishuIcon, GitLabIcon } from "../../components/icons";
 import { useI18n } from "../../i18n";
@@ -80,8 +83,132 @@ type Registration =
   | { status: "expired" | "denied" }
   | { status: "failed"; reason?: string };
 
-/** Link a Feishu app: scan, confirm, and it becomes the Bond `feishu:<appId>`. */
+/** Link a Feishu app: scan to create one (the default), or give an existing
+ * app's credentials. It becomes the Bond `feishu:<appId>`. */
 export function FeishuLinker({ onLinked }: { onLinked: (bond: string) => Promise<void> | void }) {
+  const { t } = useI18n();
+  const b = t.matter.bonds;
+  const [mode, setMode] = useState<"scan" | "existing">("scan");
+  const [linked, setLinked] = useState<LinkedFeishuApp | null>(null);
+  if (linked) {
+    return (
+      <div className="space-y-3 text-sm">
+        <SetupResult setup={linked.setup} />
+        <Button size="sm" onClick={() => void onLinked(`feishu:${linked.appId}`)}>
+          {b.done}
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <Tabs value={mode} onValueChange={(v) => setMode(v as "scan" | "existing")}>
+      <TabsList>
+        <TabsTrigger value="scan">{b.feishuModeScan}</TabsTrigger>
+        <TabsTrigger value="existing">{b.feishuModeExisting}</TabsTrigger>
+      </TabsList>
+      <TabsContent value="scan" className="pt-2">
+        <FeishuScan onLinked={onLinked} />
+      </TabsContent>
+      <TabsContent value="existing" className="pt-2">
+        <FeishuAppForm submitLabel={b.link} onLinked={setLinked} />
+      </TabsContent>
+    </Tabs>
+  );
+}
+
+/** What `POST /connect/feishu/app` returns: the app and its setup check. */
+export interface LinkedFeishuApp {
+  status: "registered";
+  appId: string;
+  brand: "feishu" | "lark";
+  setup?: SetupReport;
+  setupUnavailable?: true;
+}
+
+/**
+ * Link an existing self-built app by its App ID and App Secret. With
+ * `fixed` (a linked app), only a new secret is asked: it replaces the old
+ * one in place.
+ */
+export function FeishuAppForm({
+  fixed,
+  submitLabel,
+  onLinked,
+}: {
+  fixed?: { appId: string; brand: "feishu" | "lark" };
+  submitLabel: string;
+  onLinked: (app: LinkedFeishuApp) => void;
+}) {
+  const { t } = useI18n();
+  const b = t.matter.bonds;
+  const [appId, setAppId] = useState(fixed?.appId ?? "");
+  const [appSecret, setAppSecret] = useState("");
+  const [brand, setBrand] = useState<"feishu" | "lark">(fixed?.brand ?? "feishu");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function link() {
+    setBusy(true);
+    setError(null);
+    try {
+      const app = await matter<LinkedFeishuApp>("/connect/feishu/app", {
+        method: "POST",
+        body: JSON.stringify({ appId: appId.trim(), appSecret, brand }),
+      });
+      setAppSecret("");
+      onLinked(app);
+    } catch (err) {
+      setError(err instanceof MatterError ? err.message : b.linkFailed);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4 text-sm">
+      {!fixed && (
+        <>
+          <p className="text-fg-muted">{b.feishuExistingHint}</p>
+          <div className="space-y-1.5">
+            <Label htmlFor="feishu-brand">{b.feishuBrand}</Label>
+            <Select value={brand} onValueChange={(v) => setBrand(v as "feishu" | "lark")}>
+              <SelectTrigger id="feishu-brand" aria-label={b.feishuBrand} className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="feishu">{b.brandFeishu}</SelectItem>
+                <SelectItem value="lark">{b.brandLark}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <Field label={b.feishuAppId}>
+            <Input id="feishu-app-id" placeholder="cli_…" value={appId} onChange={(e) => setAppId(e.target.value)} />
+          </Field>
+        </>
+      )}
+      <Field label={b.feishuAppSecret}>
+        <Input
+          id="feishu-app-secret"
+          type="password"
+          autoComplete="off"
+          value={appSecret}
+          onChange={(e) => setAppSecret(e.target.value)}
+        />
+      </Field>
+      {error && (
+        <p role="alert" className="text-danger">
+          {error}
+        </p>
+      )}
+      <Button size="sm" onClick={() => void link()} disabled={busy || appId.trim() === "" || appSecret.trim() === ""}>
+        {submitLabel}
+      </Button>
+    </div>
+  );
+}
+
+/** Scan, confirm, and a new app pre-configured for the bot is linked. */
+function FeishuScan({ onLinked }: { onLinked: (bond: string) => Promise<void> | void }) {
   const { t } = useI18n();
   const b = t.matter.bonds;
   const [status, setStatus] = useState<Registration | null>(null);
@@ -160,16 +287,14 @@ export function FeishuLinker({ onLinked }: { onLinked: (bond: string) => Promise
 
 const OTHER = "__other__";
 
-/** Link a GitLab instance with a bot token; shows the webhook to add, once. */
-export function GitLabLinker({ onLinked }: { onLinked: (bond: string) => Promise<void> | void }) {
+/** The GitLab instance of a form: one the deployment offers or this
+ * workspace linked before, or "other" for a free URL. */
+function useGitLabInstance(): { url: string; field: ReactNode } {
   const { t } = useI18n();
   const b = t.matter.bonds;
-  // Instances the deployment offers plus the ones this workspace linked
-  // before; "other" switches to a free URL.
   const [instances, setInstances] = useState<string[]>([]);
   const [instance, setInstance] = useState(OTHER);
   const [baseUrl, setBaseUrl] = useState("https://gitlab.com");
-  const [token, setToken] = useState("");
   useEffect(() => {
     let live = true;
     matter<{ instances?: string[] }>("/connect/gitlab")
@@ -184,48 +309,8 @@ export function GitLabLinker({ onLinked }: { onLinked: (bond: string) => Promise
       live = false;
     };
   }, []);
-  const url = instance === OTHER ? baseUrl : instance;
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ id: string; webhookUrl: string; webhookSecret: string } | null>(null);
-  const absolute = useMemo(
-    () => (result && result.webhookUrl.startsWith("/") ? `${window.location.origin}${result.webhookUrl}` : result?.webhookUrl),
-    [result],
-  );
-
-  async function link() {
-    setBusy(true);
-    setError(null);
-    try {
-      setResult(
-        await matter<{ id: string; webhookUrl: string; webhookSecret: string }>("/connect/gitlab", {
-          method: "POST",
-          body: JSON.stringify({ baseUrl: url, token }),
-        }),
-      );
-    } catch (err) {
-      setError(err instanceof MatterError ? err.message : b.linkFailed);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (result) {
-    return (
-      <div className="space-y-2 text-sm">
-        <p className="text-fg-muted">{b.webhookHint}</p>
-        <Label>{b.webhookUrl}</Label>
-        <Input readOnly value={absolute ?? ""} onFocus={(e) => e.currentTarget.select()} />
-        <Label>{b.webhookSecret}</Label>
-        <Input readOnly value={result.webhookSecret} onFocus={(e) => e.currentTarget.select()} />
-        <Button size="sm" onClick={() => void onLinked(`gitlab:${result.id}`)}>
-          {b.done}
-        </Button>
-      </div>
-    );
-  }
-  return (
-    <div className="space-y-2 text-sm">
+  const field = (
+    <div className="space-y-1.5">
       <Label htmlFor={instances.length > 0 ? "gitlab-instance" : "gitlab-url"}>{b.gitlabUrl}</Label>
       {instances.length > 0 && (
         <Select value={instance} onValueChange={setInstance}>
@@ -243,22 +328,265 @@ export function GitLabLinker({ onLinked }: { onLinked: (bond: string) => Promise
         </Select>
       )}
       {instance === OTHER && (
-        <Input
-          id="gitlab-url"
-          aria-label={b.gitlabUrl}
-          value={baseUrl}
-          onChange={(e) => setBaseUrl(e.target.value)}
-        />
+        <Input id="gitlab-url" aria-label={b.gitlabUrl} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
       )}
-      <Label htmlFor="gitlab-token">{b.gitlabToken}</Label>
-      <Input id="gitlab-token" type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} />
+    </div>
+  );
+  return { url: instance === OTHER ? baseUrl : instance, field };
+}
+
+export type GitLabMode = "create" | "paste";
+
+/** What creating a project bot asks for; `userToken` is sent once and dropped. */
+interface GitLabBotForm {
+  project: string;
+  preset: "read" | "comment";
+  expiresAt: string;
+  userToken: string;
+}
+
+const emptyBotForm: GitLabBotForm = { project: "", preset: "read", expiresAt: "", userToken: "" };
+
+/** The request body for a project bot: no expiry means the server's default. */
+const botBody = (form: GitLabBotForm) => ({
+  project: form.project.trim(),
+  preset: form.preset,
+  ...(form.expiresAt === "" ? {} : { expiresAt: form.expiresAt }),
+  userToken: form.userToken,
+});
+
+const botFormReady = (form: GitLabBotForm) => form.project.trim() !== "" && form.userToken.trim() !== "";
+
+function GitLabBotFields({ form, onChange }: { form: GitLabBotForm; onChange: (form: GitLabBotForm) => void }) {
+  const { t } = useI18n();
+  const b = t.matter.bonds;
+  return (
+    <>
+      <p className="text-fg-muted">{b.gitlabBotHint}</p>
+      <Field label={b.gitlabProject}>
+        <Input
+          id="gitlab-project"
+          placeholder="group/name"
+          value={form.project}
+          onChange={(e) => onChange({ ...form, project: e.target.value })}
+        />
+      </Field>
+      <div className="space-y-1.5">
+      <Label id="gitlab-preset-label">{b.gitlabPreset}</Label>
+      <RadioGroup
+        aria-labelledby="gitlab-preset-label"
+        value={form.preset}
+        onValueChange={(preset) => onChange({ ...form, preset: preset as GitLabBotForm["preset"] })}
+        className="gap-2"
+      >
+        {(
+          [
+            ["read", b.gitlabPresetRead],
+            ["comment", b.gitlabPresetComment],
+          ] as const
+        ).map(([value, text]) => (
+          <div key={value} className="flex items-center gap-2">
+            <RadioGroupItem id={`gitlab-preset-${value}`} value={value} aria-label={text} />
+            <Label htmlFor={`gitlab-preset-${value}`} className="font-normal">
+              {text}
+            </Label>
+          </div>
+        ))}
+      </RadioGroup>
+      </div>
+      <Field label={b.gitlabExpires}>
+        <Input
+          id="gitlab-expires"
+          type="date"
+          value={form.expiresAt}
+          onChange={(e) => onChange({ ...form, expiresAt: e.target.value })}
+        />
+      </Field>
+      <Field label={b.gitlabUserToken}>
+        <Input
+          id="gitlab-user-token"
+          type="password"
+          autoComplete="off"
+          value={form.userToken}
+          onChange={(e) => onChange({ ...form, userToken: e.target.value })}
+        />
+      </Field>
+    </>
+  );
+}
+
+/** "Create a bot for a project" or "Paste a bot token". */
+function GitLabModeTabs({
+  mode,
+  onMode,
+  create,
+  paste,
+}: {
+  mode: GitLabMode;
+  onMode: (mode: GitLabMode) => void;
+  create: ReactNode;
+  paste: ReactNode;
+}) {
+  const { t } = useI18n();
+  const b = t.matter.bonds;
+  return (
+    <Tabs value={mode} onValueChange={(v) => onMode(v as GitLabMode)}>
+      <TabsList>
+        <TabsTrigger value="create">{b.gitlabModeCreate}</TabsTrigger>
+        <TabsTrigger value="paste">{b.gitlabModePaste}</TabsTrigger>
+      </TabsList>
+      <TabsContent value="create" className="space-y-4 pt-2">
+        {create}
+      </TabsContent>
+      <TabsContent value="paste" className="space-y-4 pt-2">
+        {paste}
+      </TabsContent>
+    </Tabs>
+  );
+}
+
+function GitLabPastedToken({ token, onChange }: { token: string; onChange: (token: string) => void }) {
+  const { t } = useI18n();
+  const b = t.matter.bonds;
+  return (
+    <>
+      <Field label={b.gitlabToken}>
+        <Input id="gitlab-token" type="password" autoComplete="off" value={token} onChange={(e) => onChange(e.target.value)} />
+      </Field>
+    </>
+  );
+}
+
+/**
+ * Link a GitLab instance: create a project bot with the user's own token
+ * (the default), or paste a bot token. Shows the webhook to add, once.
+ */
+export function GitLabLinker({ onLinked }: { onLinked: (bond: string) => Promise<void> | void }) {
+  const { t } = useI18n();
+  const b = t.matter.bonds;
+  const { url, field } = useGitLabInstance();
+  const [mode, setMode] = useState<GitLabMode>("create");
+  const [bot, setBot] = useState<GitLabBotForm>(emptyBotForm);
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<{ id: string; webhookUrl: string; webhookSecret: string } | null>(null);
+  const absolute = useMemo(
+    () => (result && result.webhookUrl.startsWith("/") ? `${window.location.origin}${result.webhookUrl}` : result?.webhookUrl),
+    [result],
+  );
+
+  async function link() {
+    setBusy(true);
+    setError(null);
+    try {
+      setResult(
+        await matter<{ id: string; webhookUrl: string; webhookSecret: string }>(
+          mode === "create" ? "/connect/gitlab/bot" : "/connect/gitlab",
+          {
+            method: "POST",
+            body: JSON.stringify(mode === "create" ? { baseUrl: url, ...botBody(bot) } : { baseUrl: url, token }),
+          },
+        ),
+      );
+      // The user's token was for this one call.
+      setBot((form) => ({ ...form, userToken: "" }));
+    } catch (err) {
+      setError(err instanceof MatterError ? err.message : b.linkFailed);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (result) {
+    return (
+      <div className="space-y-4 text-sm">
+        <p className="text-fg-muted">{b.webhookHint}</p>
+        <Field label={b.webhookUrl}>
+          <Input readOnly value={absolute ?? ""} onFocus={(e) => e.currentTarget.select()} />
+        </Field>
+        <Field label={b.webhookSecret}>
+          <Input readOnly value={result.webhookSecret} onFocus={(e) => e.currentTarget.select()} />
+        </Field>
+        <Button size="sm" onClick={() => void onLinked(`gitlab:${result.id}`)}>
+          {b.done}
+        </Button>
+      </div>
+    );
+  }
+  const ready = mode === "create" ? botFormReady(bot) : token.trim() !== "";
+  return (
+    <div className="space-y-4 text-sm">
+      {field}
+      <GitLabModeTabs
+        mode={mode}
+        onMode={setMode}
+        create={<GitLabBotFields form={bot} onChange={setBot} />}
+        paste={<GitLabPastedToken token={token} onChange={setToken} />}
+      />
       {error && (
         <p role="alert" className="text-danger">
           {error}
         </p>
       )}
-      <Button size="sm" onClick={() => void link()} disabled={busy || token.trim() === ""}>
-        {b.link}
+      <Button size="sm" onClick={() => void link()} disabled={busy || !ready}>
+        {mode === "create" ? b.createBot : b.link}
+      </Button>
+    </div>
+  );
+}
+
+/** Give a GitLab Bond a new token in place: its webhook and Loops stay. */
+export function GitLabTokenReplacer({
+  connectionId,
+  onReplaced,
+}: {
+  /** The connection id (`gitlab-…`), without the `gitlab:` Bond prefix. */
+  connectionId: string;
+  onReplaced: () => void;
+}) {
+  const { t } = useI18n();
+  const b = t.matter.bonds;
+  const [mode, setMode] = useState<GitLabMode>("create");
+  const [bot, setBot] = useState<GitLabBotForm>(emptyBotForm);
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function replace() {
+    setBusy(true);
+    setError(null);
+    try {
+      await matter(`/connect/gitlab/${encodeURIComponent(connectionId)}/token`, {
+        method: "PUT",
+        body: JSON.stringify(mode === "create" ? botBody(bot) : { token }),
+      });
+      setBot(emptyBotForm);
+      setToken("");
+      onReplaced();
+    } catch (err) {
+      setError(err instanceof MatterError ? err.message : b.linkFailed);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const ready = mode === "create" ? botFormReady(bot) : token.trim() !== "";
+  return (
+    <div className="space-y-4 text-sm">
+      <GitLabModeTabs
+        mode={mode}
+        onMode={setMode}
+        create={<GitLabBotFields form={bot} onChange={setBot} />}
+        paste={<GitLabPastedToken token={token} onChange={setToken} />}
+      />
+      {error && (
+        <p role="alert" className="text-danger">
+          {error}
+        </p>
+      )}
+      <Button size="sm" onClick={() => void replace()} disabled={busy || !ready}>
+        {b.replace}
       </Button>
     </div>
   );

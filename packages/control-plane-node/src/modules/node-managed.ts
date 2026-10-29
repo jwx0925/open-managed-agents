@@ -21,6 +21,8 @@ import { resolveProtocolEndpointsFromModelCard } from "@open-managed-agents/infe
 import { resolveManagedSubagentSession } from "../lib/node-managed-subagents.js";
 import { installEnvironmentPackages } from "../lib/environment-packages";
 import { createManagedSandboxBuilder } from "../lib/node-managed-sandbox-builder";
+import { createPreparedSandboxBases } from "../lib/prepared-sandbox-bases";
+import { SqlKvStore } from "@open-managed-agents/kv-store/adapters/sql";
 import { EMPTY_SANDBOX_IMAGE_CATALOG } from "@open-managed-agents/sandbox";
 import { injectVaultEnvironment, vaultEnvironmentVariables } from "../lib/vault-environment";
 import { resolveSessionSandboxMode, readManagedSessionMappingMetadata } from "@open-managed-agents/openai-agents-compat";
@@ -72,6 +74,7 @@ import { resolveFeishuAgentTools } from "../lib/feishu-agent-tools.js";
 import { NodeManagedSessionOutputCollector } from "../lib/node-managed-session-outputs.js";
 import { NodeManagedWorkspaceCheckpoints } from "../lib/node-managed-workspace-checkpoints.js";
 import { nodeSessionLifecycle } from "../lib/node-session-lifecycle.js";
+import { matterRepositoryCredentials } from "../lib/matter-repository-credentials.js";
 import { SqlSessionResourceSecretSource } from "@open-managed-agents/session-resource-store-sql";
 
 import { rm } from "node:fs/promises";
@@ -128,6 +131,7 @@ export async function createManagedNodeRuntime(
     filesBlob,
     buildSandbox,
     resolveNodeModelCreds,
+    resolveDreamModelCredentials,
     buildNodeLanguageModel,
   } = foundation;
   // ─── Official Managed Sessions composition ─────────────────────────────
@@ -390,6 +394,15 @@ export async function createManagedNodeRuntime(
       })
     : undefined;
   await workspaceCheckpoints?.ensureSchema();
+  const preparedSandboxBases = createPreparedSandboxBases(config.sandbox, components.sandbox, {
+    kvFor: (workspaceId) => new SqlKvStore({ db: foundation.drizzleDb, tenantId: workspaceId }),
+    createBuilderSandbox: (sessionId, scope) =>
+      foundation.buildPreparedBaseSandbox(sessionId, join(config.paths.sandboxWorkdir, sessionId), scope),
+    logger,
+  });
+  if (preparedSandboxBases !== undefined) {
+    disposables.add("prepared_sandbox_bases", () => preparedSandboxBases.dispose());
+  }
 
   const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
     backgroundPiSandbox: true,
@@ -452,6 +465,7 @@ export async function createManagedNodeRuntime(
       images: config.sandbox.images,
       workdir: (sessionId) => join(config.paths.sandboxWorkdir, sessionId),
       build: buildSandbox,
+      ...(preparedSandboxBases === undefined ? {} : { preparedBases: preparedSandboxBases }),
     }),
     ...(sharedSessionOutputs === undefined ? {} : {
       isSandboxCurrent: ({ workspaceId, session, runtimeGeneration }: { workspaceId: string; session: { id: string }; runtimeGeneration: string }) =>
@@ -473,6 +487,9 @@ export async function createManagedNodeRuntime(
           .app({ workspaceId })
           .port(managedAgentsPortTokens.skillVersions),
         repositoryCredentials: managedSessionResourceSecrets,
+        ...(config.http.matter === undefined
+          ? {}
+          : { repositoryBonds: matterRepositoryCredentials(config.http.matter) }),
         memorySnapshots: new NodeManagedMemorySnapshotMaterializer(
           managedMemoriesApplicationForWorkspace(workspaceId)
             .port(managedAgentsPortTokens.memories),
@@ -993,15 +1010,12 @@ export async function createManagedNodeRuntime(
         .port(managedAgentsPortTokens.environmentWork),
   );
 
-  const managedDreamCurator =
-    config.dreamCurator === "dedup" ||
-      config.model.apiKey === undefined
+  // No platform model key: each curation resolves the Dream workspace's own
+  // model card for dream.model, exactly like a Session turn.
+  const managedDreamCurator = config.dreamCurator === "dedup"
     ? new DeduplicatingDreamCurator()
     : new AnthropicMessagesDreamCurator({
-        apiKey: config.model.apiKey,
-        ...(config.model.baseUrl !== undefined && {
-          baseUrl: config.model.baseUrl,
-        }),
+        resolveCredentials: resolveDreamModelCredentials,
       });
   const managedDreamsRoutes = buildManagedDreamRoutes((context) =>
     managedPlatform

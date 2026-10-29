@@ -398,7 +398,8 @@ describe("Matter service", () => {
       data: { id: string; configSchema: { properties: Record<string, { "x-oma-section"?: string }> } }[];
     }).data;
     const properties = templates.find((t) => t.id === "feishu-agent")!.configSchema.properties;
-    expect(Object.keys(properties).slice(-2)).toEqual(["environmentId", "vaultIds"]);
+    expect(Object.keys(properties).slice(-3)).toEqual(["environmentId", "vaultIds", "repositories"]);
+    expect(properties.repositories?.["x-oma-section"]).toBe("session");
     expect(properties.vaultIds?.["x-oma-section"]).toBe("session");
 
     // Unknown environments and vaults are refused.
@@ -431,6 +432,77 @@ describe("Matter service", () => {
     // Matter's own vault (the MCP bearer) comes first, then the Loop's.
     expect(sessions[0]?.vault_ids).toHaveLength(2);
     expect(sessions[0]?.vault_ids[1]).toBe("vlt_user");
+  });
+
+  it("clones the Loop's repositories with the workspace's GitLab Bond, never handing out its token", async () => {
+    const service = await start();
+    const call = (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) =>
+      service.fetch(
+        new Request(`https://matter.test${path}`, {
+          method,
+          headers: {
+            "x-matter-proxy-secret": "proxy-secret",
+            "x-oma-tenant-id": "default",
+            ...(body === undefined ? {} : { "content-type": "application/json" }),
+            ...headers,
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        }),
+      );
+    await service.connectFeishu({ ...connection, agentId: undefined });
+    await service.db.gitlab.save({
+      id: "gitlab-a1", baseUrl: "https://gitlab.example.com", token: "glpat-bond", username: "bot",
+      webhookSecret: "w", projectIds: [], tenantId: "default", agentId: "",
+    });
+    await service.db.gitlab.save({
+      id: "gitlab-b2", baseUrl: "https://gitlab.other.com", token: "glpat-other", username: "bot",
+      webhookSecret: "w", projectIds: [], tenantId: "tenant-else", agentId: "",
+    });
+    const config = { bond: `feishu:${APP_ID}`, agentId: "agent-1" };
+
+    // A repository no Bond of the workspace serves is refused when saved.
+    for (const url of ["https://gitlab.other.com/g/app.git", "https://gitlab.example.com/app", "not a url"]) {
+      const refused = await call("POST", "/loops", { template: "feishu-agent", config: { ...config, repositories: [url] } });
+      expect(refused.status, url).toBe(404);
+      expect(((await refused.json()) as { issues: { field: string }[] }).issues[0]?.field).toBe("repositories");
+    }
+    const created = await call("POST", "/loops", {
+      template: "feishu-agent",
+      config: { ...config, repositories: ["https://gitlab.example.com/group/app.git"] },
+    });
+    expect(created.status).toBe(201);
+
+    // The session gets the repository without a token.
+    await ws[0]!.invoke!(mention("ev_1", "om_1"));
+    await waitFor(() => oma.sessions.size > 0 || undefined);
+    const session = [...oma.sessions.values()][0]!;
+    expect(session.resources).toEqual([{ type: "github_repository", url: "https://gitlab.example.com/group/app.git" }]);
+    expect(JSON.stringify(session)).not.toContain("glpat");
+
+    // Only the control plane's internal secret gets the token, for its own tenant.
+    const ask = (url: string, headers: Record<string, string>) =>
+      service.fetch(new Request("https://matter.test/internal/repository-credential", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify({ url }),
+      }));
+    const repo = "https://gitlab.example.com/group/app.git";
+    expect((await ask(repo, { "x-matter-proxy-secret": "proxy-secret", "x-oma-tenant-id": "default" })).status).toBe(401);
+    expect((await ask(repo, { "x-matter-internal-secret": "wrong", "x-oma-tenant-id": "default" })).status).toBe(401);
+    const ok = await ask(repo, { "x-matter-internal-secret": "proxy-secret", "x-oma-tenant-id": "default" });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ token: "glpat-bond" });
+    const otherTenant = await ask(repo, { "x-matter-internal-secret": "proxy-secret", "x-oma-tenant-id": "tenant-else" });
+    expect(otherTenant.status).toBe(404);
+    expect(await otherTenant.text()).not.toContain("glpat");
+    for (const url of ["https://gitlab.example.com.evil.com/group/app.git", "https://gitlab.example.com/../x/y.git",
+      "https://user:pw@gitlab.example.com/group/app.git", "https://gitlab.example.com/group"]) {
+      const res = await ask(url, { "x-matter-internal-secret": "proxy-secret", "x-oma-tenant-id": "default" });
+      expect(res.status, url).not.toBe(200);
+    }
+
+    // The Bond cannot go while a Loop clones with it.
+    expect((await call("DELETE", "/bonds/gitlab%3Agitlab-a1")).status).toBe(409);
   });
 
   it("runs a scheduled Loop at its times and posts the report to its chats, once per time", async () => {
@@ -521,11 +593,36 @@ describe("Matter service", () => {
         .state;
     expect((await loopState()).lastError).toBeUndefined();
 
+    // Run now: one more report at once, each request once, the schedule kept.
+    const loopId = ((await created.clone().json()) as { id: string }).id;
+    now = Date.parse("2026-10-20T03:30:00Z");
+    const run = await call("POST", `/loops/${loopId}/run`);
+    expect(run.status).toBe(202);
+    expect(await run.json()).toEqual({ loopId, scheduledAt: "2026-10-20T03:30:00.000Z" });
+    await waitFor(() => feishu.sent[1]);
+    expect((await call("POST", `/loops/${loopId}/run`)).status).toBe(202);
+    await waitFor(() => feishu.sent[2]);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(feishu.sent).toHaveLength(3);
+    expect(pending.some((p) => new Date(p.at).toISOString() === "2026-10-21T02:00:00.000Z")).toBe(true);
+    // Only scheduled, enabled Loops of the tenant can be run.
+    const answering = await call("POST", "/loops", { template: "feishu-agent", config: { bond, agentId: "agent-1" } });
+    const answeringId = ((await answering.json()) as { id: string }).id;
+    expect((await call("POST", `/loops/${answeringId}/run`)).status).toBe(400);
+    expect((await call("DELETE", `/loops/${answeringId}`)).status).toBe(204);
+    expect((await call("PATCH", `/loops/${loopId}`, { enabled: false })).status).toBe(200);
+    expect((await call("POST", `/loops/${loopId}/run`)).status).toBe(409);
+    expect((await call("PATCH", `/loops/${loopId}`, { enabled: true })).status).toBe(200);
+    expect((await call("POST", "/loops/loop-nope/run")).status).toBe(404);
+    feishu.sent.splice(1);
+
     // The bot left the chat: the next report cannot be posted, and the Loop
     // says so instead of looking healthy.
     feishu.notIn.add("oc_eng");
     now = Date.parse("2026-10-21T02:00:00Z");
-    pending.find((p) => new Date(p.at).toISOString() === "2026-10-21T02:00:00.000Z")!.callback();
+    // The connection restarted above, so the timer to fire is the one it armed
+    // last (the double tick left a stale one from the stopped connection).
+    pending.filter((p) => new Date(p.at).toISOString() === "2026-10-21T02:00:00.000Z").at(-1)!.callback();
     let failed: { message: string } | undefined;
     for (let i = 0; i < 400 && failed === undefined; i++) {
       failed = (await loopState()).lastError;
@@ -807,7 +904,7 @@ describe("Loop sessions", () => {
     expect([...drivers.keys()]).toEqual(["agent-1", key]);
     expect(drivers.get(key)).toEqual({
       agentId: "agent-1",
-      session: { environmentId: "env_report", vaultIds: ["vlt_2", "vlt_1"] },
+      session: { environmentId: "env_report", vaultIds: ["vlt_2", "vlt_1"], repositories: [] },
     });
   });
 
